@@ -1,15 +1,18 @@
 name: Ingestor OpenSky
 
-# T-04 y T-05: publica estados reales de OpenSky en opensky-states-v1.
-# Por ahora solo se dispara a mano; el cron de 5 minutos llega en la T-03.
+# Publica estados reales de OpenSky en opensky-states-v1 (T-03, T-04 y T-05).
+# Area por defecto: Colombia. Se acota para controlar el volumen de escrituras
+# en Firestore y el consumo de creditos de la API de OpenSky.
 
 on:
+  schedule:
+    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       bbox:
-        description: "Area a consultar: lamin,lomin,lamax,lomax. Vacio = mundo completo."
+        description: "Area a consultar: lamin,lomin,lamax,lomax (por defecto, Colombia)."
         required: false
-        default: "45.8,5.9,47.8,10.5"
+        default: "-4.3,-79.1,13.5,-66.8"
 
 permissions:
   contents: read
@@ -49,5 +52,6 @@ jobs:
           OPENSKY_CLIENT_SECRET: ${{ secrets.OPENSKY_CLIENT_SECRET }}
           GCP_PROJECT_ID: flighttracker-506923
           PUBSUB_TOPIC: opensky-states-v1
-          OPENSKY_BBOX: ${{ inputs.bbox }}
+          # En las corridas del cron no hay inputs, asi que se usa Colombia.
+          OPENSKY_BBOX: ${{ inputs.bbox || '-4.3,-79.1,13.5,-66.8' }}
         run: python ingestor/publicar_estados.py
