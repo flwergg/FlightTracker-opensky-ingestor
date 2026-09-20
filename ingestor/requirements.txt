@@ -1,0 +1,2 @@
+requests>=2.31,<3
+google-cloud-pubsub>=2.21,<3

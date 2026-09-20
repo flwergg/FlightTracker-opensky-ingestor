@@ -1,0 +1,53 @@
+name: Ingestor OpenSky
+
+# T-04 y T-05: publica estados reales de OpenSky en opensky-states-v1.
+# Por ahora solo se dispara a mano; el cron de 5 minutos llega en la T-03.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bbox:
+        description: "Area a consultar: lamin,lomin,lamax,lomax. Vacio = mundo completo."
+        required: false
+        default: "45.8,5.9,47.8,10.5"
+
+permissions:
+  contents: read
+  id-token: write # necesario para Workload Identity Federation
+
+concurrency:
+  group: ingestor-opensky
+  cancel-in-progress: false
+
+jobs:
+  ingestar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Descargar el codigo
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: ingestor/requirements.txt
+
+      - name: Instalar dependencias
+        run: pip install -r ingestor/requirements.txt
+
+      - name: Autenticar en Google Cloud (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Obtener y publicar estados
+        env:
+          OPENSKY_CLIENT_ID: ${{ secrets.OPENSKY_CLIENT_ID }}
+          OPENSKY_CLIENT_SECRET: ${{ secrets.OPENSKY_CLIENT_SECRET }}
+          GCP_PROJECT_ID: flighttracker-506923
+          PUBSUB_TOPIC: opensky-states-v1
+          OPENSKY_BBOX: ${{ inputs.bbox }}
+        run: python ingestor/publicar_estados.py
