@@ -1,18 +1,21 @@
 name: Ingestor OpenSky
 
-# Publica estados reales de OpenSky en opensky-states-v1 (T-03, T-04 y T-05).
-# Area por defecto: Colombia. Se acota para controlar el volumen de escrituras
-# en Firestore y el consumo de creditos de la API de OpenSky.
+# Publica lecturas reales de OpenSky en opensky-states-v1 (T-03, T-04 y T-05):
+# un mensaje opensky.state.v2 por lectura con los vuelos de aerolinea (US-43,
+# T-160 y T-161). Area por defecto: la costa este de EE. UU. (T-159), la misma
+# geografia de BTS; cada lectura cuesta 3 creditos de OpenSky (T-158).
+#
+# Lo dispara Cloud Scheduler cada 2 minutos por workflow_dispatch
+# (disparar_ingestor_opensky, US-24). Ya no tiene un schedule propio: el cron
+# de GitHub corria ademas del de Cloud Scheduler y duplicaba lecturas.
 
 on:
-  schedule:
-    - cron: "2-59/5 * * * *"
   workflow_dispatch:
     inputs:
       bbox:
-        description: "Area a consultar: lamin,lomin,lamax,lomax (por defecto, Colombia)."
+        description: "Area a consultar: lamin,lomin,lamax,lomax (por defecto, la costa este de EE. UU.)."
         required: false
-        default: "-4.3,-79.1,13.5,-66.8"
+        default: "24.5,-85.0,43.0,-69.5"
 
 permissions:
   contents: read
@@ -52,6 +55,6 @@ jobs:
           OPENSKY_CLIENT_SECRET: ${{ secrets.OPENSKY_CLIENT_SECRET }}
           GCP_PROJECT_ID: flighttracker-506923
           PUBSUB_TOPIC: opensky-states-v1
-          # En las corridas del cron no hay inputs, asi que se usa Colombia.
-          OPENSKY_BBOX: ${{ inputs.bbox || '-4.3,-79.1,13.5,-66.8' }}
+          # Si el disparo no trae bbox, se usa la costa este de EE. UU.
+          OPENSKY_BBOX: ${{ inputs.bbox || '24.5,-85.0,43.0,-69.5' }}
         run: python ingestor/publicar_estados.py
