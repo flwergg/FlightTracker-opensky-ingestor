@@ -4,15 +4,15 @@ Ingestor de estados de vuelo en vivo para FlightTracker, el proyecto de la asign
 
 ## Qué hace
 
-Un workflow de GitHub Actions se ejecuta cada 5 minutos y, en cada corrida:
+Cloud Scheduler, desde el proyecto de GCP de FlightTracker, dispara el workflow de GitHub Actions cada 2 minutos por `workflow_dispatch` (función `disparar_ingestor_opensky`). En cada corrida, el workflow:
 
 1. Obtiene un token OAuth2 de OpenSky Network mediante el flujo `client_credentials`.
-2. Consulta el endpoint `https://opensky-network.org/api/states/all`.
-3. Normaliza cada vector de estado al contrato `opensky.state.v1` (ver más abajo).
-4. Se autentica en Google Cloud mediante Workload Identity Federation, sin llaves JSON de service account.
-5. Publica cada estado como un mensaje en el topic de Pub/Sub `opensky-states-v1` del proyecto GCP de FlightTracker.
+2. Consulta `https://opensky-network.org/api/states/all` en el área de la costa este de EE. UU. (`24.5,-85.0,43.0,-69.5`), la misma geografía de los vuelos de BTS. Cada consulta cuesta 3 créditos de OpenSky.
+3. Deja solo los vuelos de aerolínea: callsign con el ICAO de una aerolínea de `ingestor/aerolineas_icao.txt` seguido de un número de vuelo (`AAL1234`, `DAL98A`). La aviación general se descarta y se cuenta en el log.
+4. Arma un mensaje `opensky.state.v2` con todos los aviones de la lectura, en JSON comprimido con gzip.
+5. Se autentica en Google Cloud mediante Workload Identity Federation, sin llaves JSON de service account, y publica el mensaje en el topic de Pub/Sub `opensky-states-v1`.
 
-El workflow también puede dispararse manualmente con `workflow_dispatch`.
+El workflow también puede dispararse a mano con `workflow_dispatch`, con otra área en el input `bbox`.
 
 ## Por qué vive separado del repositorio principal
 
@@ -25,43 +25,33 @@ Hay dos restricciones que se combinan.
 ## Cómo se conecta con `opensky-states-v1`
 
 ```text
+Cloud Scheduler (*/2) -> disparar_ingestor_opensky -> workflow_dispatch
+   ▼
 GitHub Actions (este repo)
-   │  OAuth2 → OpenSky /api/states/all
+   │  OAuth2 → OpenSky /api/states/all (costa este)
    │  Workload Identity Federation → Google Cloud
    ▼
-Pub/Sub: opensky-states-v1          (repositorio principal, Terraform)
+Pub/Sub: opensky-states-v1          (un mensaje opensky.state.v2 por lectura)
    ▼
 Cloud Function: project_opensky_state
-   ▼
-Firestore: live_flights             (un documento por icao24, se sobrescribe)
+   ├─ Firestore: live_state/actual   (estado de todos los aviones de la lectura)
+   ├─ Firestore: flight_events       (despegó y aterrizó)
+   └─ Cloud Storage: lectura cruda   (se borra a los 14 días)
    ▼
 API Cloud Run: /live/flights, /live/flights/{icao24}, /live/count
 ```
 
-Este repositorio solo es responsable del primer tramo, hasta la publicación en `opensky-states-v1`. El topic, la Cloud Function, la colección y la API se declaran y despliegan desde el repositorio principal.
+Este repositorio solo es responsable del primer tramo, hasta la publicación en `opensky-states-v1`. El topic, la Cloud Function, las colecciones y la API se declaran y despliegan desde el repositorio principal.
 
-### Contrato del mensaje (`opensky.state.v1`)
+### Contrato del mensaje (`opensky.state.v2`)
 
-Cada mensaje es un JSON en UTF-8 con estos campos. El contrato es idéntico al que usaba el productor anterior en Cloud Run (`pipelines/streaming/productor_opensky/main.py`), así que la función `project_opensky_state` lo consume sin cambios.
+Un mensaje por lectura. Los datos son JSON en UTF-8 comprimido con gzip. Los atributos de Pub/Sub son `schema_version=opensky.state.v2`, `content_encoding=gzip`, `observed_at` (segundos Unix de la lectura), `source=opensky` y `aviones` (cantidad).
 
-| Campo                                  | Origen en el vector de OpenSky | Notas                                                                                              |
-| -------------------------------------- | ------------------------------ | -------------------------------------------------------------------------------------------------- |
-| `schema_version`                       | constante                      | Siempre `opensky.state.v1`                                                                         |
-| `event_id`                             | calculado                      | `sha256("{observed_at}\|{icao24}\|{last_contact}")`, para trazabilidad de la ingesta               |
-| `observed_at`                          | `time` de la respuesta         | Epoch Unix en segundos                                                                             |
-| `icao24`                               | índice 0                       | En minúsculas y sin espacios; clave del documento en `live_flights`                                |
-| `callsign`                             | índice 1                       | Sin espacios al inicio ni al final                                                                 |
-| `origin_country`                       | índice 2                       |                                                                                                    |
-| `longitude`, `latitude`                | índices 5 y 6                  |                                                                                                    |
-| `baro_altitude`                        | índice 7                       |                                                                                                    |
-| `on_ground`                            | índice 8                       |                                                                                                    |
-| `velocity`, `heading`, `vertical_rate` | índices 9, 10 y 11             |                                                                                                    |
-| `geo_altitude`                         | índice 13                      |                                                                                                    |
-| `squawk`, `spi`, `position_source`     | índices 14, 15 y 16            |                                                                                                    |
-| `category`                             | índice 17                      | Puede no venir; en ese caso `null`                                                                 |
-| `source`                               | constante                      | Siempre `opensky`, para distinguirlo de los eventos sintéticos (`manual-demo`, `integration-test`) |
+El cuerpo trae `schema_version`, `event_id` (identifica la lectura), `observed_at`, `source`, `area` (los límites consultados), `descartados_aviacion_general` y la lista `aviones`. Cada avión trae `icao24`, `callsign`, `aerolinea_icao`, `numero` (sin ceros a la izquierda, como en BTS), `origin_country`, `latitude`, `longitude`, `baro_altitude`, `geo_altitude`, `on_ground`, `velocity`, `heading`, `vertical_rate`, `squawk`, `last_contact`, `position_source` y `category`.
 
-Los vectores sin `icao24` se descartan. Cada mensaje lleva además los atributos de Pub/Sub `schema_version=opensky.state.v1` y `source=opensky`.
+La especificación completa, con un ejemplo, está en `docs/sprint2/contrato-opensky-state-v2.md` del repositorio principal. Con `OPENSKY_CONTRATO=v1` el ingestor vuelve a publicar un mensaje `opensky.state.v1` por avión, como antes; ese contrato se retira en T-232.
+
+`ingestor/aerolineas_icao.txt` lo genera `ingestor/generar_aerolineas_icao.py`: todos los ICAO de OpenFlights, en un commit fijo y sin mirar la marca de activa (PSA Airlines figura inactiva), más las aerolíneas de EE. UU. que OpenFlights no tiene con su ICAO actual.
 
 ## Autenticación y secretos
 
@@ -86,12 +76,14 @@ Como el repositorio es público, cualquier persona puede leer los logs de las ej
 
 ## Consideraciones operativas
 
-- GitHub puede retrasar las ejecuciones programadas en momentos de alta carga, por lo que el intervalo de 5 minutos es aproximado. Para una demostración conviene disparar el workflow manualmente.
-- GitHub desactiva los workflows programados de un repositorio público tras 60 días sin actividad. Si se desactiva, se reactiva desde la pestaña *Actions*.
+- **Lo dispara Cloud Scheduler, no un cron de GitHub.** Los workflows programados de GitHub resultaron irregulares (US-24) y, mientras convivieron con Cloud Scheduler, duplicaban lecturas. Por eso el workflow ya no tiene `schedule`.
+- **Créditos de OpenSky.** 720 lecturas al día (`*/2`) a 3 créditos cada una son 2.160 de los 4.000 créditos diarios de una cuenta registrada (medición V4, T-158).
+- **Minutos de GitHub Actions.** Cada corrida dura unos 20 s y se factura como 1 minuto. Son unos 720 minutos al día, sin costo porque el repositorio es público.
+- **Copia en el repositorio principal.** `pipelines/streaming/ingestor_opensky/` lleva una copia de `publicar_estados.py` para el servicio `datos-live` de Docker Compose. Un cambio aquí se lleva allá a mano, manteniendo sus dos diferencias documentadas (no imprime el token y los avisos son mensajes normales).
 
 ## Estado
 
-En construcción durante el Sprint 2 (historia US-01.1 del backlog del repositorio principal). Este README se actualizará cuando exista una corrida productiva documentada.
+En producción desde el Sprint 2 (US-01.1, US-24). Con US-43 pasó a la costa este, a una lectura cada 2 minutos y al contrato `opensky.state.v2`.
 
 ## Equipo
 
