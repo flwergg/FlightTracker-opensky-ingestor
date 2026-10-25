@@ -5,8 +5,8 @@ los publica en Pub/Sub. Por defecto publica un mensaje por lectura con el
 contrato opensky.state.v2 (T-161, docs/sprint2/contrato-opensky-state-v2.md
 del repositorio principal):
 todos los aviones de aerolinea de la lectura en un JSON comprimido con gzip.
-Con OPENSKY_CONTRATO=v1 publica un mensaje por avion, como antes (se quita en
-T-232).
+Desde T-232 es el unico contrato: project_opensky_state manda a la DLQ
+cualquier otro, asi que ya no hay modo v1 (un mensaje por avion).
 
 La normalizacion replica la del productor anterior en Cloud Run
 (katals/FlightTracker: pipelines/streaming/productor_opensky/main.py) para que
@@ -22,7 +22,6 @@ Variables de entorno:
   GCP_PROJECT_ID                            proyecto GCP de destino
   PUBSUB_TOPIC                              topic de destino (opensky-states-v1)
   OPENSKY_BBOX                              opcional: "lamin,lomin,lamax,lomax"
-  OPENSKY_CONTRATO                          opcional: v2 (por defecto) o v1
 """
 
 import gzip
@@ -223,35 +222,6 @@ def decodificar_lectura(datos: bytes, atributos: dict[str, str]) -> dict[str, An
     return json.loads(datos)
 
 
-def publicar(project_id: str, topic: str, eventos: list[dict[str, Any]]) -> tuple[int, int]:
-    # Import diferido: las pruebas del filtro no necesitan el cliente de Pub/Sub.
-    from google.cloud import pubsub_v1
-
-    publisher = pubsub_v1.PublisherClient()
-    topic_path = publisher.topic_path(project_id, topic)
-
-    futures = [
-        publisher.publish(
-            topic_path,
-            json.dumps(evento).encode("utf-8"),
-            schema_version=SCHEMA_VERSION,
-            source=SOURCE,
-        )
-        for evento in eventos
-    ]
-
-    publicados, fallidos = 0, 0
-    for future in futures:
-        try:
-            future.result(timeout=60)
-            publicados += 1
-        except Exception as exc:  # noqa: BLE001 - se reporta y se cuenta
-            fallidos += 1
-            if fallidos <= 3:
-                print(f"Error publicando un estado: {exc}", flush=True)
-    return publicados, fallidos
-
-
 def publicar_lectura(project_id: str, topic: str, lectura: dict[str, Any]) -> None:
     """Publica una lectura opensky.state.v2 como un solo mensaje."""
     from google.cloud import pubsub_v1
@@ -267,9 +237,6 @@ def main() -> int:
     project_id = _required_env("GCP_PROJECT_ID")
     topic = _required_env("PUBSUB_TOPIC")
     bbox = os.environ.get("OPENSKY_BBOX", "").strip()
-    contrato = os.environ.get("OPENSKY_CONTRATO", "v2").strip() or "v2"
-    if contrato not in ("v1", "v2"):
-        raise RuntimeError("OPENSKY_CONTRATO debe ser v1 o v2")
 
     token = obtener_token(client_id, client_secret)
     observed_at, states = consultar_estados(token, bbox)
@@ -277,35 +244,17 @@ def main() -> int:
     eventos = [e for e in (normalizar_estado(observed_at, s) for s in states) if e]
     descartados = len(states) - len(eventos)
     codigos = cargar_aerolineas_icao()
-    if contrato == "v2":
-        lectura = construir_lectura_v2(observed_at, eventos, codigos, _parametros_bbox(bbox) if bbox else None)
-        publicar_lectura(project_id, topic, lectura)
-        print(f"contrato: {SCHEMA_VERSION_V2} (un mensaje por lectura)")
-        print(f"area consultada: {bbox or 'mundo completo'}")
-        print(f"observed_at: {observed_at}")
-        print(f"states recibidos: {len(states)}")
-        print(f"states descartados: {descartados}")
-        print(f"states descartados (aviacion general): {lectura['descartados_aviacion_general']}")
-        print(f"aviones publicados: {len(lectura['aviones'])}")
-        if not lectura["aviones"]:
-            print("::warning::No se publico ningun avion en esta corrida")
-        return 0
-
-    eventos, aviacion_general = filtrar_aerolineas(eventos, codigos)
-    publicados, fallidos = publicar(project_id, topic, eventos)
-
+    lectura = construir_lectura_v2(observed_at, eventos, codigos, _parametros_bbox(bbox) if bbox else None)
+    publicar_lectura(project_id, topic, lectura)
+    print(f"contrato: {SCHEMA_VERSION_V2} (un mensaje por lectura)")
     print(f"area consultada: {bbox or 'mundo completo'}")
     print(f"observed_at: {observed_at}")
     print(f"states recibidos: {len(states)}")
     print(f"states descartados: {descartados}")
-    print(f"states descartados (aviacion general): {aviacion_general}")
-    print(f"states publicados: {publicados}")
-    print(f"states fallidos: {fallidos}")
-
-    if fallidos:
-        return 1
-    if publicados == 0:
-        print("::warning::No se publico ningun estado en esta corrida")
+    print(f"states descartados (aviacion general): {lectura['descartados_aviacion_general']}")
+    print(f"aviones publicados: {len(lectura['aviones'])}")
+    if not lectura["aviones"]:
+        print("::warning::No se publico ningun avion en esta corrida")
     return 0
 
 
