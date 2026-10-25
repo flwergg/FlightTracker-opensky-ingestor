@@ -49,7 +49,7 @@ Un mensaje por lectura. Los datos son JSON en UTF-8 comprimido con gzip. Los atr
 
 El cuerpo trae `schema_version`, `event_id` (identifica la lectura), `observed_at`, `source`, `area` (los límites consultados), `descartados_aviacion_general` y la lista `aviones`. Cada avión trae `icao24`, `callsign`, `aerolinea_icao`, `numero` (sin ceros a la izquierda, como en BTS), `origin_country`, `latitude`, `longitude`, `baro_altitude`, `geo_altitude`, `on_ground`, `velocity`, `heading`, `vertical_rate`, `squawk`, `last_contact`, `position_source` y `category`.
 
-La especificación completa, con un ejemplo, está en `docs/sprint2/contrato-opensky-state-v2.md` del repositorio principal. Con `OPENSKY_CONTRATO=v1` el ingestor vuelve a publicar un mensaje `opensky.state.v1` por avión, como antes; ese contrato se retira en T-232.
+La especificación completa, con un ejemplo, está en `docs/sprint2/contrato-opensky-state-v2.md` del repositorio principal. Es el único contrato: desde T-232 `project_opensky_state` manda cualquier otro a `opensky-states-dlq`, así que el ingestor ya no tiene modo v1.
 
 `ingestor/aerolineas_icao.txt` lo genera `ingestor/generar_aerolineas_icao.py`: todos los ICAO de OpenFlights, en un commit fijo y sin mirar la marca de activa (PSA Airlines figura inactiva), más las aerolíneas de EE. UU. que OpenFlights no tiene con su ICAO actual.
 
