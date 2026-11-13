@@ -20,7 +20,7 @@ Hay dos restricciones que se combinan.
 
 **Restricción de red.** OpenSky no acepta conexiones desde Google Cloud: desde Cloud Shell y Cloud Run la conexión TCP expira, mientras que desde una red residencial y desde un runner de GitHub Actions el servidor responde. El diagnóstico completo está en `docs/sprint2/evidencias/01-conectividad-opensky-oauth2-y-bloqueo-gcp.md` del repositorio principal. Por eso la ingesta se hace desde GitHub Actions y no desde un servicio en GCP.
 
-**Restricción de minutos de GitHub Actions.** El repositorio principal es privado, y en repositorios privados los minutos de GitHub Actions tienen una cuota mensual. Un workflow cada 5 minutos son 288 ejecuciones diarias; como cada job se factura redondeando hacia arriba al minuto, el consumo mínimo ronda los 8.640 minutos al mes, muy por encima de la cuota del plan gratuito. En repositorios públicos los runners estándar no consumen esa cuota. Por eso, en decisión acordada con el docente el 16 de septiembre de 2026, el ingestor vive en este repositorio público y separado.
+**Restricción de minutos de GitHub Actions.** El repositorio principal es privado, y en repositorios privados los minutos de GitHub Actions tienen una cuota mensual. Cuando se tomó la decisión, el ingestor corría cada 5 minutos: 288 ejecuciones diarias que, como cada job se factura redondeando hacia arriba al minuto, sumaban unos 8.640 minutos al mes, muy por encima de la cuota del plan gratuito. Con la cadencia actual de 2 minutos son 720 ejecuciones diarias, unos 21.600 minutos al mes. En repositorios públicos los runners estándar no consumen esa cuota. Por eso, en decisión acordada con el docente el 16 de septiembre de 2026, el ingestor vive en este repositorio público y separado.
 
 ## Cómo se conecta con `opensky-states-v1`
 
@@ -32,16 +32,19 @@ GitHub Actions (este repo)
    │  Workload Identity Federation → Google Cloud
    ▼
 Pub/Sub: opensky-states-v1          (un mensaje opensky.state.v2 por lectura)
+   ├─▶ Cloud Function: project_opensky_state
+   │     ├─ Firestore: live_state/actual   (estado de todos los aviones de la lectura)
+   │     ├─ Firestore: flight_events       (despegó y aterrizó)
+   │     └─ Cloud Storage: lectura cruda   (se borra a los 14 días)
+   ├─▶ Cloud Function: proyectar_estado_cloudsql
+   │     └─ Cloud SQL: vuelos_en_vivo y eventos_vuelo (los consulta el agente de IA)
+   └─▶ Cloud Function: generar_avisos_vuelo
+         └─ Firestore: flight_events       (avisos de los vuelos que alguien sigue)
    ▼
-Cloud Function: project_opensky_state
-   ├─ Firestore: live_state/actual   (estado de todos los aviones de la lectura)
-   ├─ Firestore: flight_events       (despegó y aterrizó)
-   └─ Cloud Storage: lectura cruda   (se borra a los 14 días)
-   ▼
-API Cloud Run: /live/flights, /live/flights/{icao24}, /live/count
+API Cloud Run: /live/flights, /live/flights/{icao24}, /live/count -> dashboard
 ```
 
-Este repositorio solo es responsable del primer tramo, hasta la publicación en `opensky-states-v1`. El topic, la Cloud Function, las colecciones y la API se declaran y despliegan desde el repositorio principal.
+Este repositorio solo es responsable del primer tramo, hasta la publicación en `opensky-states-v1`. El topic, las Cloud Functions, las colecciones, Cloud SQL y la API se declaran y despliegan desde el repositorio principal.
 
 ### Contrato del mensaje (`opensky.state.v2`)
 
@@ -55,9 +58,9 @@ La especificación completa, con un ejemplo, está en `docs/sprint2/contrato-ope
 
 ## Autenticación y secretos
 
-La autenticación contra Google Cloud usará `google-github-actions/auth` con Workload Identity Federation, de modo que Google Cloud confíe directamente en este repositorio sin guardar llaves JSON de service account. El proveedor de identidad se configurará para aceptar únicamente tokens emitidos para este repositorio. Esta configuración corresponde a las tareas T-01 y T-02 del backlog y está en construcción.
+La autenticación contra Google Cloud usa `google-github-actions/auth` con Workload Identity Federation (T-01, T-02), así que Google Cloud confía directamente en este repositorio sin guardar llaves JSON de service account. El proveedor de identidad solo acepta tokens emitidos para este repositorio (`attribute_condition` sobre `assertion.repository`), y la service account `opensky-ingestor` solo puede publicar en `opensky-states-v1`. Ambos se declaran en `infrastructure/terraform/wif_github.tf` del repositorio principal.
 
-Secrets que requerirá el workflow en *Settings → Secrets and variables → Actions* (solo se documentan sus nombres; los valores nunca se escriben en el repositorio):
+Secrets que requiere el workflow en *Settings → Secrets and variables → Actions* (solo se documentan sus nombres; los valores nunca se escriben en el repositorio):
 
 | Secret                           | Uso                                                               |
 | -------------------------------- | ----------------------------------------------------------------- |
@@ -79,7 +82,7 @@ Como el repositorio es público, cualquier persona puede leer los logs de las ej
 - **Lo dispara Cloud Scheduler, no un cron de GitHub.** Los workflows programados de GitHub resultaron irregulares (US-24) y, mientras convivieron con Cloud Scheduler, duplicaban lecturas. Por eso el workflow ya no tiene `schedule`.
 - **Créditos de OpenSky.** 720 lecturas al día (`*/2`) a 3 créditos cada una son 2.160 de los 4.000 créditos diarios de una cuenta registrada (medición V4, T-158).
 - **Minutos de GitHub Actions.** Cada corrida dura unos 20 s y se factura como 1 minuto. Son unos 720 minutos al día, sin costo porque el repositorio es público.
-- **Copia en el repositorio principal.** `pipelines/streaming/ingestor_opensky/` lleva una copia de `publicar_estados.py` para el servicio `datos-live` de Docker Compose. Un cambio aquí se lleva allá a mano, manteniendo sus dos diferencias documentadas (no imprime el token y los avisos son mensajes normales).
+- **Copia en el repositorio principal.** `pipelines/streaming/ingestor_opensky/` lleva una copia de `publicar_estados.py` para el servicio `datos-live` de Docker Compose. Un cambio aquí se lleva allá a mano, manteniendo sus dos diferencias documentadas (no imprime el token y los avisos son mensajes normales); allá las dependencias van con versión exacta (`==`), como exige el CI del repositorio principal. Al 13 de noviembre de 2026 las dos copias coinciden en todo lo demás (comparadas contra el commit `0ee3a45`).
 
 ## Estado
 
